@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   DndContext,
   closestCenter,
@@ -15,389 +15,438 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import themes from "./theme.json";
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const WS_URL = API.replace("http", "ws") + "/ws";
+// Same origin in production (served by FastAPI); proxied by Vite in dev.
+const API = import.meta.env.VITE_API_URL || "";
+const WS_URL = API
+  ? API.replace(/^http/, "ws") + "/ws"
+  : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+
+// Unique marker in the page title → backend recognises this tab (Smart Pause).
+const UI_TOKEN = Math.random().toString(36).slice(2, 10);
+document.title = `FlexiOrder #${UI_TOKEN}`;
+
+const MODES = [
+  { value: "none", label: "Normale" },
+  { value: "borderless", label: "Borderless" },
+  { value: "f11", label: "F11" },
+];
+
+const STATUS = {
+  stopped: { label: "● Inattivo", cls: "idle" },
+  running: { label: "▶ Attivo", cls: "running" },
+  paused: { label: "⏸ In pausa", cls: "paused" },
+  paused_ui: { label: "⏸ Pausa (FlexiOrder in primo piano)", cls: "paused" },
+  desktop_hidden: { label: "◌ In attesa (desktop non visibile)", cls: "waiting" },
+  empty: { label: "⚠ Nessuna finestra disponibile", cls: "paused" },
+};
+
+const keyOf = (desktop, monitor) => `${desktop}|${monitor}`;
+
+async function api(path, method = "GET", body) {
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(typeof detail.detail === "string" ? detail.detail : `HTTP ${res.status}`);
+  }
+  return res.json();
+}
 
 // ──────────────────────────────────────────────────────────────
 // Sortable card
 // ──────────────────────────────────────────────────────────────
 function WindowCard({ item, index, isActive, onChange, onRemove }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: item.hwnd });
+    useSortable({ id: item.id });
+  const [timer, setTimer] = useState(String(item.timer));
+  useEffect(() => setTimer(String(item.timer)), [item.timer]);
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    zIndex: isDragging ? 999 : "auto",
+  const commitTimer = () => {
+    const n = Math.round(Number(timer));
+    const valid = Number.isFinite(n) ? Math.min(3600, Math.max(1, n)) : item.timer;
+    setTimer(String(valid));
+    if (valid !== item.timer) onChange(item.id, "timer", valid);
   };
 
   return (
     <div
       ref={setNodeRef}
-      style={style}
-      className={`card ${isActive ? "card--active" : ""} ${isDragging ? "card--dragging" : ""}`}
+      style={{ transform: CSS.Transform.toString(transform), transition, zIndex: isDragging ? 999 : "auto" }}
+      className={`card ${isActive ? "card--active" : ""} ${isDragging ? "card--dragging" : ""} ${item.missing ? "card--missing" : ""}`}
     >
-      {/* Drag handle */}
-      <span className="drag-handle" {...attributes} {...listeners}>
-        ⠿
-      </span>
-
-      {/* Index badge */}
-      <span className="index-badge">{index + 1}</span>
-
-      {/* Title */}
-      <span className="win-title" title={item.title}>
-        {item.title.length > 38 ? item.title.slice(0, 36) + "…" : item.title}
-      </span>
-
-      {/* Timer control */}
-      <label className="field-label">
-        <span>Timer</span>
-        <div className="timer-input-wrap">
+      <div className="card-row">
+        <span className="drag-handle" {...attributes} {...listeners}>⠿</span>
+        <span className="index-badge">{index + 1}</span>
+        <span className="win-title" title={`${item.title}${item.exe ? ` (${item.exe})` : ""}`}>
+          {item.title}
+        </span>
+        {item.missing && <span className="badge badge--warn" title="Finestra chiusa o non trovata: verrà ricollegata quando riappare">mancante</span>}
+        <button className="remove-btn" onClick={() => onRemove(item.id)} title="Rimuovi">✕</button>
+      </div>
+      <div className="card-row card-row--controls">
+        <label className="field-inline">
+          <span>Timer</span>
           <input
             type="number"
             min={1}
-            max={999}
-            value={item.timer}
-            onChange={(e) => onChange(item.hwnd, "timer", Number(e.target.value))}
+            max={3600}
+            value={timer}
+            onChange={(e) => setTimer(e.target.value)}
+            onBlur={commitTimer}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
             className="timer-input"
           />
           <span className="unit">s</span>
-        </div>
-      </label>
-
-      {/* Force F11 toggle */}
-      <label className="toggle-wrap" title="Force fullscreen via F11">
-        <span>F11</span>
-        <input
-          type="checkbox"
-          checked={item.force_f11}
-          onChange={(e) => onChange(item.hwnd, "force_f11", e.target.checked)}
-          className="toggle"
-        />
-        <span className="toggle-slider" />
-      </label>
-
-      {/* Remove */}
-      <button className="remove-btn" onClick={() => onRemove(item.hwnd)} title="Remove">
-        ✕
-      </button>
-    </div>
-  );
-}
-
-// ──────────────────────────────────────────────────────────────
-// Window picker modal
-// ──────────────────────────────────────────────────────────────
-function PickerModal({ available, onAdd, onClose }) {
-  const [filter, setFilter] = useState("");
-  const filtered = available.filter((w) =>
-    w.title.toLowerCase().includes(filter.toLowerCase())
-  );
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2 className="modal-title">Add Windows</h2>
-        <input
-          className="modal-search"
-          placeholder="Filter…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          autoFocus
-        />
-        <ul className="picker-list">
-          {filtered.map((w) => (
-            <li key={w.hwnd} className="picker-item" onClick={() => onAdd(w)}>
-              <span className="picker-title">{w.title}</span>
-              <span className="picker-add">+</span>
-            </li>
-          ))}
-          {filtered.length === 0 && (
-            <li className="picker-empty">Nessuna finestra trovata</li>
-          )}
-        </ul>
-        <button className="modal-close" onClick={onClose}>
-          Chiudi
-        </button>
+        </label>
+        <label className="field-inline">
+          <span>Schermo</span>
+          <select
+            className="mode-select"
+            value={item.mode}
+            onChange={(e) => onChange(item.id, "mode", e.target.value)}
+            title="Borderless: riempie il monitor senza bordi (non ruba il focus). F11: fullscreen del programma (richiede il focus)."
+          >
+            {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </label>
       </div>
     </div>
   );
 }
 
 // ──────────────────────────────────────────────────────────────
-// Status bar
+// Window picker
 // ──────────────────────────────────────────────────────────────
-function StatusBar({ running, paused, index, seqLen }) {
-  let label = "● Inattivo";
-  let cls = "status status--idle";
+function PickerModal({ desktop, monitor, desktops, monitors, usedBy, exclude, onAdd, onClose }) {
+  const [windows, setWindows] = useState(null);
+  const [filter, setFilter] = useState("");
+  const [onlyHere, setOnlyHere] = useState(true);
 
-  if (running && paused) {
-    label = "⏸ Pausa (app in focus)";
-    cls = "status status--paused";
-  } else if (running) {
-    label = `▶ Attivo — finestra ${index + 1} / ${seqLen}`;
-    cls = "status status--running";
-  }
+  useEffect(() => {
+    api("/api/windows").then((d) => setWindows(d.windows)).catch(() => setWindows([]));
+  }, []);
 
-  return <div className={cls}>{label}</div>;
+  const deskName = (id) => desktops.find((d) => d.id === id)?.name ?? "—";
+  const monName = (id) => monitors.find((m) => m.id === id)?.name ?? "—";
+  const multiDesk = desktops.length > 1;
+
+  const list = (windows ?? []).filter(
+    (w) =>
+      !exclude.has(w.hwnd) &&
+      (!onlyHere || !multiDesk || w.desktop === desktop.id || !w.desktop) &&
+      `${w.title} ${w.exe}`.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h2 className="modal-title">
+          Aggiungi a {monitor.name} · {desktop.name}
+        </h2>
+        <input className="modal-search" placeholder="Filtra…" value={filter}
+          onChange={(e) => setFilter(e.target.value)} autoFocus />
+        {multiDesk && (
+          <label className="check">
+            <input type="checkbox" checked={onlyHere} onChange={(e) => setOnlyHere(e.target.checked)} />
+            Solo finestre su {desktop.name}
+          </label>
+        )}
+        <ul className="picker-list">
+          {windows === null && <li className="picker-empty">Caricamento…</li>}
+          {list.map((w) => (
+            <li key={w.hwnd} className="picker-item" onClick={() => onAdd(w)}>
+              <div className="picker-main">
+                <span className="picker-title">{w.title}</span>
+                <span className="picker-meta">
+                  {w.exe || "?"} · {monName(w.monitor)}
+                  {multiDesk && ` · ${deskName(w.desktop)}`}
+                  {w.minimized && " · ridotta a icona"}
+                  {usedBy.get(w.hwnd) && <span className="badge">in uso: {usedBy.get(w.hwnd)}</span>}
+                </span>
+              </div>
+              <span className="picker-add">+</span>
+            </li>
+          ))}
+          {windows !== null && list.length === 0 && <li className="picker-empty">Nessuna finestra trovata</li>}
+        </ul>
+        {multiDesk && (
+          <p className="hint">
+            Windows non permette di spostare finestre di altri programmi tra desktop virtuali:
+            aggiungi finestre che si trovano già su {desktop.name}.
+          </p>
+        )}
+        <button className="modal-close" onClick={onClose}>Chiudi</button>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────
+// One monitor = one independent carousel
+// ──────────────────────────────────────────────────────────────
+function MonitorColumn({ desktop, monitor, carousel, onItems, onAction, onPick, disconnected }) {
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const items = carousel?.items ?? [];
+  const status = carousel?.running ? carousel.status : "stopped";
+  const st = STATUS[status] ?? STATUS.stopped;
+  const activeIdx = items.findIndex((i) => i.id === carousel?.active_id);
+
+  const handleDragEnd = ({ active, over }) => {
+    if (!over || active.id === over.id) return;
+    const from = items.findIndex((s) => s.id === active.id);
+    const to = items.findIndex((s) => s.id === over.id);
+    onItems(arrayMove(items, from, to));
+  };
+  const change = (id, field, value) => onItems(items.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
+  const remove = (id) => onItems(items.filter((s) => s.id !== id));
+  const hasF11 = items.some((i) => i.mode === "f11");
+
+  return (
+    <section className={`column ${disconnected ? "column--off" : ""}`}>
+      <header className="column-header">
+        <div>
+          <h2>{monitor.name}</h2>
+          <span className="column-sub">{disconnected ? "non collegato" : `${monitor.size} · ${monitor.id}`}</span>
+        </div>
+        <span className="seq-count">{items.length} finestre</span>
+      </header>
+
+      <div className={`status status--${st.cls}`}>
+        {st.label}
+        {status === "running" && activeIdx >= 0 && ` — ${activeIdx + 1} / ${items.length}`}
+      </div>
+
+      <div className="column-actions">
+        {!carousel?.running ? (
+          <button className="btn btn--start" disabled={!items.length || disconnected}
+            onClick={() => onAction("start")}>▶ Avvia</button>
+        ) : (
+          <>
+            <button className="btn btn--stop" onClick={() => onAction("stop")}>■ Ferma</button>
+            {status === "paused" ? (
+              <button className="btn btn--ghost" onClick={() => onAction("resume")}>▶ Riprendi</button>
+            ) : (
+              <button className="btn btn--ghost" onClick={() => onAction("pause")}>⏸ Pausa</button>
+            )}
+          </>
+        )}
+        <button className="btn btn--ghost" disabled={disconnected} onClick={onPick}>+ Aggiungi</button>
+      </div>
+
+      {hasF11 && (
+        <p className="hint hint--warn">F11 richiede il focus: quando mostra quella finestra, questo monitor prende la tastiera.</p>
+      )}
+
+      {items.length === 0 ? (
+        <div className="empty-state">
+          <span className="empty-icon">⊡</span>
+          <p>Nessuna finestra per {monitor.name} su {desktop.name}.</p>
+        </div>
+      ) : (
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={items.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+            <div className="card-list">
+              {items.map((item, idx) => (
+                <WindowCard key={item.id} item={item} index={idx}
+                  isActive={status === "running" && carousel?.active_id === item.id}
+                  onChange={change} onRemove={remove} />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      )}
+    </section>
+  );
 }
 
 // ──────────────────────────────────────────────────────────────
 // Main App
 // ──────────────────────────────────────────────────────────────
 export default function App() {
-  const [sequence, setSequence] = useState([]);
-  const [available, setAvailable] = useState([]);
-  const [showPicker, setShowPicker] = useState(false);
+  const [state, setState] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [selectedDesktop, setSelectedDesktop] = useState(null);
+  const [picker, setPicker] = useState(null); // monitor object
+  const [error, setError] = useState("");
   const [theme, setTheme] = useState(() => {
-    const saved = window.localStorage.getItem("theme");
-    return saved && themes[saved] ? saved : "dark";
-  });
-  const [carouselStatus, setCarouselStatus] = useState({
-    running: false,
-    paused: false,
-    index: 0,
-    active_hwnd: null,
+    try {
+      const saved = window.localStorage.getItem("theme");
+      return saved && themes[saved] ? saved : "dark";
+    } catch {
+      return "dark";
+    }
   });
   const wsRef = useRef(null);
 
   useEffect(() => {
-    const selected = themes[theme] ?? themes.dark;
-    Object.entries(selected).forEach(([key, value]) => {
-      document.documentElement.style.setProperty(`--${key}`, value);
-    });
-    window.localStorage.setItem("theme", theme);
+    Object.entries(themes[theme] ?? themes.dark).forEach(([k, v]) =>
+      document.documentElement.style.setProperty(`--${k}`, v));
+    try { window.localStorage.setItem("theme", theme); } catch { /* private mode */ }
   }, [theme]);
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
-
-  // ── WebSocket ──────────────────────────────────────────────
+  // ── WebSocket: the backend pushes the full state on every change ──
   useEffect(() => {
+    let closed = false;
     function connect() {
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
-
+      ws.onopen = () => {
+        setConnected(true);
+        api("/api/self", "POST", { token: UI_TOKEN }).catch(() => {});
+      };
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "status") {
-          setCarouselStatus((prev) => ({ ...prev, ...msg }));
-        } else if (msg.type === "window_closed") {
-          setSequence(msg.sequence);
-        }
+        if (msg.type === "state") setState(msg);
       };
-
-      ws.onclose = () => setTimeout(connect, 2000);
+      ws.onclose = () => {
+        setConnected(false);
+        if (!closed) setTimeout(connect, 1500);
+      };
     }
     connect();
-    return () => wsRef.current?.close();
+    return () => { closed = true; wsRef.current?.close(); };
   }, []);
 
-  // ── Sync sequence to backend whenever it changes ──────────
-  const syncSequence = useCallback(async (seq) => {
-    await fetch(`${API}/api/sequence`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: seq }),
+  const desktops = state?.desktops ?? [];
+  const desktopId = selectedDesktop ?? state?.current_desktop ?? desktops[0]?.id;
+  const desktop = desktops.find((d) => d.id === desktopId) ?? desktops[0];
+
+  const carousels = useMemo(() => {
+    const m = new Map();
+    (state?.carousels ?? []).forEach((c) => m.set(c.key, c));
+    return m;
+  }, [state]);
+
+  // Monitors to show: connected ones + disconnected ones that still hold a sequence.
+  const columns = useMemo(() => {
+    if (!state || !desktop) return [];
+    const cols = state.monitors.map((m) => ({ monitor: m, disconnected: false }));
+    state.carousels
+      .filter((c) => c.desktop === desktop.id && c.items.length && !state.monitors.some((m) => m.id === c.monitor))
+      .forEach((c) => cols.push({ monitor: { id: c.monitor, name: c.monitor, size: "" }, disconnected: true }));
+    return cols;
+  }, [state, desktop]);
+
+  const usedBy = useMemo(() => {
+    const m = new Map();
+    (state?.carousels ?? []).forEach((c) => {
+      const mon = state.monitors.find((x) => x.id === c.monitor)?.name ?? c.monitor;
+      const desk = state.desktops.find((x) => x.id === c.desktop)?.name ?? "";
+      c.items.forEach((i) => m.set(i.hwnd, state.desktops.length > 1 ? `${mon} · ${desk}` : mon));
     });
+    return m;
+  }, [state]);
+
+  const run = useCallback(async (fn) => {
+    try { setError(""); await fn(); } catch (e) { setError(e.message); }
   }, []);
 
-  const updateSequence = (newSeq) => {
-    setSequence(newSeq);
-    syncSequence(newSeq);
-  };
-
-  // ── Load available windows ─────────────────────────────────
-  const refreshWindows = async () => {
-    const res = await fetch(`${API}/api/windows`);
-    const data = await res.json();
-    setAvailable(data.windows);
-  };
-
-  // ── Drag & drop ────────────────────────────────────────────
-  const handleDragEnd = ({ active, over }) => {
-    if (!over || active.id === over.id) return;
-    const oldIdx = sequence.findIndex((s) => s.hwnd === active.id);
-    const newIdx = sequence.findIndex((s) => s.hwnd === over.id);
-    const reordered = arrayMove(sequence, oldIdx, newIdx);
-    updateSequence(reordered);
-  };
-
-  // ── Card mutations ─────────────────────────────────────────
-  const handleChange = (hwnd, field, value) => {
-    const updated = sequence.map((s) => (s.hwnd === hwnd ? { ...s, [field]: value } : s));
-    updateSequence(updated);
-  };
-
-  const handleRemove = (hwnd) => {
-    const updated = sequence.filter((s) => s.hwnd !== hwnd);
-    updateSequence(updated);
-  };
-
-  const handleAdd = (win) => {
-    if (sequence.find((s) => s.hwnd === win.hwnd)) return;
-    const updated = [...sequence, { ...win, timer: 5, force_f11: false }];
-    updateSequence(updated);
-  };
-
-  // ── Carousel controls ──────────────────────────────────────
-  const startCarousel = async () => {
-    const selfRes = await fetch(`${API}/api/self-hwnd`);
-    const selfData = await selfRes.json();
-    const appHwnd =
-      selfData.candidates?.find((c) => c.title.includes("FlexiOrder"))?.hwnd ||
-      selfData.candidates?.find((c) => c.title.includes("localhost"))?.hwnd ||
-      selfData.candidates?.[0]?.hwnd ||
-      0;
-
-    if (!appHwnd) {
-      alert("Non ho trovato la finestra di FlexiOrder. Ricarica la pagina e riprova.");
-      return;
-    }
-
-    const res = await fetch(`${API}/api/carousel/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ app_hwnd: appHwnd }),
+  // Optimistic local update, then persist; the WS echo confirms.
+  const setItems = (monitorId, items) => {
+    const key = keyOf(desktop.id, monitorId);
+    setState((s) => {
+      const exists = s.carousels.some((c) => c.key === key);
+      const carousels = exists
+        ? s.carousels.map((c) => (c.key === key ? { ...c, items } : c))
+        : [...s.carousels, { key, desktop: desktop.id, monitor: monitorId, items, running: false, status: "stopped" }];
+      return { ...s, carousels };
     });
-    const data = await res.json();
-    if (data.ok) {
-      setCarouselStatus((prev) => ({
-        ...prev,
-        running: true,
-        paused: false,
-        index: 0,
-        active_hwnd: null,
-      }));
-    }
+    run(() => api("/api/carousel/sequence", "PUT", { desktop: desktop.id, monitor: monitorId, items }));
   };
 
-  const stopCarousel = async () => {
-    const res = await fetch(`${API}/api/carousel/stop`, { method: "POST" });
-    const data = await res.json();
-    if (data.ok) {
-      setCarouselStatus({
-        running: false,
-        paused: false,
-        index: 0,
-        active_hwnd: null,
-      });
-    }
+  const action = (monitorId, name) =>
+    run(() => api(`/api/carousel/${name}`, "POST", { desktop: desktop.id, monitor: monitorId }));
+
+  const addWindow = (monitorId, w) => {
+    const cur = carousels.get(keyOf(desktop.id, monitorId))?.items ?? [];
+    if (cur.some((i) => i.hwnd === w.hwnd)) return;
+    setItems(monitorId, [...cur, { id: Math.random().toString(36).slice(2, 14), hwnd: w.hwnd, title: w.title, exe: w.exe, timer: 5, mode: "none" }]);
   };
+
+  const runningCount = (state?.carousels ?? []).filter((c) => c.running).length;
 
   // ──────────────────────────────────────────────────────────
   return (
     <div className="shell">
-      {/* Sidebar */}
       <aside className="sidebar">
         <div className="logo">
           <span className="logo-icon">⧉</span>
           <span className="logo-text">FlexiOrder</span>
         </div>
 
-        <StatusBar
-          running={carouselStatus.running}
-          paused={carouselStatus.paused}
-          index={carouselStatus.index}
-          seqLen={sequence.length}
-        />
+        <div className={`conn ${connected ? "conn--ok" : ""}`}>
+          {connected ? "● Backend connesso" : "○ Backend non raggiungibile…"}
+        </div>
+
+        <nav className="desk-list">
+          <span className="section-label">Desktop virtuali</span>
+          {desktops.map((d) => {
+            const active = (state?.carousels ?? []).filter((c) => c.desktop === d.id && c.running).length;
+            return (
+              <button key={d.id}
+                className={`desk-btn ${d.id === desktop?.id ? "desk-btn--sel" : ""}`}
+                onClick={() => setSelectedDesktop(d.id)}>
+                <span>{d.name}</span>
+                <span className="desk-tags">
+                  {d.id === state?.current_desktop && <span className="badge badge--accent">attuale</span>}
+                  {active > 0 && <span className="badge">{active} ▶</span>}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
 
         <div className="sidebar-actions">
-          {!carouselStatus.running ? (
-            <button
-              className="btn btn--start"
-              onClick={startCarousel}
-              disabled={sequence.length < 1}
-            >
-              ▶ Avvia Carosello
-            </button>
-          ) : (
-            <button className="btn btn--stop" onClick={stopCarousel}>
-              ■ Ferma
-            </button>
-          )}
-
-          <button
-            className="btn btn--theme"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          >
-            {theme === "dark" ? "Attiva tema chiaro" : "Attiva tema scuro"}
-          </button>
-
-          <button
-            className="btn btn--add"
-            onClick={() => {
-              refreshWindows();
-              setShowPicker(true);
-            }}
-          >
-            + Aggiungi Finestra
+          <button className="btn btn--stop" disabled={!runningCount}
+            onClick={() => run(() => api("/api/stop-all", "POST"))}>■ Ferma tutto ({runningCount})</button>
+          <button className="btn btn--ghost" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+            {theme === "dark" ? "Tema chiaro" : "Tema scuro"}
           </button>
         </div>
 
         <div className="sidebar-info">
-          <p>
-            <strong>Smart Pause:</strong> il carosello si mette in pausa
-            automaticamente quando questa finestra è in primo piano.
-          </p>
-          <p>
-            <strong>Drag</strong> le card per cambiare l'ordine.
-          </p>
+          <p><strong>Ogni monitor</strong> ha il suo carosello, con finestre e tempi indipendenti.</p>
+          <p><strong>Ogni desktop virtuale</strong> ha i suoi caroselli: ruotano solo quando quel desktop è visibile (Win+Ctrl+←/→).</p>
+          <p><strong>Smart Pause:</strong> il monitor dove si trova questa pagina si ferma mentre la usi.</p>
         </div>
       </aside>
 
-      {/* Main content */}
       <main className="main">
         <header className="main-header">
-          <h1>Sequenza Attiva</h1>
-          <span className="seq-count">{sequence.length} finestre</span>
+          <h1>{desktop?.name ?? "…"}</h1>
+          {desktop && desktop.id !== state?.current_desktop && state?.current_desktop && (
+            <span className="hint">Non è il desktop attuale: questi caroselli ripartono quando ci passi.</span>
+          )}
         </header>
 
-        {sequence.length === 0 ? (
-          <div className="empty-state">
-            <span className="empty-icon">⊡</span>
-            <p>Nessuna finestra in sequenza.</p>
-            <p>Clicca <em>Aggiungi Finestra</em> per iniziare.</p>
-          </div>
+        {error && <div className="error" onClick={() => setError("")}>{error} ✕</div>}
+
+        {!state ? (
+          <div className="empty-state"><p>Connessione al backend…</p></div>
         ) : (
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragEnd={handleDragEnd}
-          >
-            <SortableContext
-              items={sequence.map((s) => s.hwnd)}
-              strategy={verticalListSortingStrategy}
-            >
-              <div className="card-list">
-                {sequence.map((item, idx) => (
-                  <WindowCard
-                    key={item.hwnd}
-                    item={item}
-                    index={idx}
-                    isActive={
-                      carouselStatus.running &&
-                      !carouselStatus.paused &&
-                      carouselStatus.active_hwnd === item.hwnd
-                    }
-                    onChange={handleChange}
-                    onRemove={handleRemove}
-                  />
-                ))}
-              </div>
-            </SortableContext>
-          </DndContext>
+          <div className="columns">
+            {columns.map(({ monitor, disconnected }) => (
+              <MonitorColumn key={monitor.id}
+                desktop={desktop} monitor={monitor} disconnected={disconnected}
+                carousel={carousels.get(keyOf(desktop.id, monitor.id))}
+                onItems={(items) => setItems(monitor.id, items)}
+                onAction={(name) => action(monitor.id, name)}
+                onPick={() => setPicker(monitor)} />
+            ))}
+          </div>
         )}
       </main>
 
-      {showPicker && (
+      {picker && desktop && (
         <PickerModal
-          available={available.filter((w) => !sequence.find((s) => s.hwnd === w.hwnd))}
-          onAdd={(w) => {
-            handleAdd(w);
-            setShowPicker(false);
-          }}
-          onClose={() => setShowPicker(false)}
+          desktop={desktop} monitor={picker} desktops={desktops} monitors={state.monitors}
+          usedBy={usedBy}
+          exclude={new Set((carousels.get(keyOf(desktop.id, picker.id))?.items ?? []).map((i) => i.hwnd))}
+          onAdd={(w) => { addWindow(picker.id, w); setPicker(null); }}
+          onClose={() => setPicker(null)}
         />
       )}
     </div>
