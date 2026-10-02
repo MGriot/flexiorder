@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.0 — 2026-10-02
+
+### Added
+- **Portable single-file exe** (`FlexiOrder-<version>-win64.exe`) that needs no installation and no Python. It's built with PyInstaller via `packaging/build.py`, and a GitHub Actions release workflow builds it on every `v*` tag.
+- System-tray mode (`run.py --tray`, always on in the exe): Apri FlexiOrder / Esci, no console window.
+- The portable exe keeps `config.json` and `flexiorder.log` next to itself, falling back to `%APPDATA%\FlexiOrder` when that folder isn't writable.
+
 ## 2.0.0 — 2026-09-21
 
 ### Added

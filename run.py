@@ -1,15 +1,18 @@
 """
 FlexiOrder – start everything with one command:
 
-    python run.py [--port 8765] [--no-browser]
+    python run.py [--port 8765] [--no-browser] [--tray]
 
 Serves the API and the prebuilt UI (backend/static) on http://127.0.0.1:<port>.
+This is also the entry point of the portable FlexiOrder.exe (packaging/build.py),
+which always runs in tray mode without a console.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import sys
 import threading
@@ -21,6 +24,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "backend"
 DEFAULT_PORT = 8765  # 8000 often falls in Hyper-V/WSL reserved port ranges
+FROZEN = getattr(sys, "frozen", False)
+
+sys.path.insert(0, str(BACKEND))
+
+
+def _redirect_output() -> None:
+    """A --noconsole exe has no stdout/stderr: send prints to a log beside the config."""
+    from flexiorder import config
+
+    try:
+        log = open(config.default_path().with_name("flexiorder.log"), "w", encoding="utf-8", buffering=1)
+    except OSError:
+        log = open(os.devnull, "w")
+    sys.stdout = sys.stderr = log
 
 
 def _is_flexiorder(port: int) -> bool:
@@ -50,6 +67,8 @@ def _pick_port(preferred: int) -> int:
 
 
 def main() -> int:
+    if FROZEN:
+        _redirect_output()
     # Windows consoles may be cp1252; window titles can contain any character.
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -60,7 +79,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FlexiOrder window carousel")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-browser", action="store_true", help="don't open the UI automatically")
+    parser.add_argument("--tray", action="store_true", help="run in the background with a system-tray icon")
     args = parser.parse_args()
+    tray = args.tray or FROZEN
 
     if sys.platform != "win32":
         print("FlexiOrder controls Windows windows and only runs on Windows.")
@@ -68,6 +89,8 @@ def main() -> int:
     try:
         import uvicorn  # noqa: F401
         import win32gui  # noqa: F401
+        if tray:
+            import pystray  # noqa: F401
     except ImportError as e:
         print(f"Missing dependency ({e.name}). Install with:\n"
               f"  pip install -r {BACKEND / 'requirements.txt'}")
@@ -85,7 +108,6 @@ def main() -> int:
     if port != args.port:
         print(f"Port {args.port} is unavailable, using {port}.")
 
-    sys.path.insert(0, str(BACKEND))
     from flexiorder.app import STATIC_DIR, app
 
     url = f"http://127.0.0.1:{port}"
@@ -106,9 +128,25 @@ def main() -> int:
 
     import uvicorn
 
-    print(f"FlexiOrder running at {url}   (Ctrl+C to stop)")
     # Localhost only: this API can move every window on the machine.
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    if not tray:
+        print(f"FlexiOrder running at {url}   (Ctrl+C to stop)")
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        return 0
+
+    from flexiorder.tray import run_tray
+
+    # log_config=None: uvicorn's default handlers need a real console.
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
+                                           log_config=None, log_level="warning"))
+    thread = threading.Thread(target=server.run, name="uvicorn")
+    thread.start()
+    print(f"FlexiOrder running at {url}   (tray icon → Esci to stop)")
+    try:
+        run_tray(url, server, thread)
+    finally:
+        server.should_exit = True
+        thread.join()
     return 0
 
 

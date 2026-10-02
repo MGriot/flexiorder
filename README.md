@@ -2,7 +2,7 @@
 
 FlexiOrder rotates windows automatically: each window stays in front for its own timer, then the next one takes over. It runs **one independent carousel per monitor, per virtual desktop**. Every screen on every desktop has its own windows, order, timers, and start/stop/pause.
 
-It's a local Python app: a FastAPI backend drives the Win32 API, and a React UI is served from the same process.
+It's a local app: a Python/FastAPI backend drives the Win32 API, and a React UI is served from the same process. Run it as a **portable single-file exe** (no install) or from source.
 
 ## ✨ Features
 
@@ -12,12 +12,23 @@ It's a local Python app: a FastAPI backend drives the Win32 API, and a React UI 
   - *Borderless*: removes the frame and fills the monitor. Works on any monitor, doesn't need focus. Restored when you stop or remove the window.
   - *F11*: the app's own fullscreen (browsers). Pressed only if the window isn't already fullscreen, and only when it really has focus.
 - **Smart Pause**: the monitor showing the FlexiOrder page pauses while you use it. Other monitors keep going.
-- **Persistent**: sequences are saved to `%APPDATA%\FlexiOrder\config.json`. After a restart, windows are re-linked by program + title. Closed windows show as "mancante" and re-link automatically when they reappear.
+- **Persistent**: sequences are saved to `%APPDATA%\FlexiOrder\config.json` (the portable exe keeps them next to itself). After a restart, windows are re-linked by program + title. Closed windows show as "mancante" and re-link automatically when they reappear.
 - **Zero-latency switching**: DWM transitions are disabled during each switch.
 
 ---
 
 ## 🚀 Getting started
+
+### Portable exe (no install)
+
+Download `FlexiOrder-<version>-win64.exe` from the [GitHub Releases page](https://github.com/MGriot/flexiorder/releases) (or [build it](#-building-the-portable-exe)) and double-click it. It's one file with no installer and no Python needed. It runs on Windows 10/11 only, because everything FlexiOrder does goes through the Win32 API.
+
+- There's no console window. A **⧉ tray icon** appears and the UI opens in your browser. Tray menu: **Apri FlexiOrder** (also on double-click) and **Esci**, which stops the carousels, restores borderless windows and saves.
+- `config.json` and `flexiorder.log` are written **next to the exe**, so you can carry it on a USB stick. If that folder isn't writable (e.g. Program Files), the config goes to `%APPDATA%\FlexiOrder\` instead.
+- The build is unsigned, so on first launch SmartScreen may say "Windows protected your PC". Click **More info → Run anyway**.
+- Launching it again while it's running just opens the UI.
+
+### From source
 
 Prerequisites: Windows 10/11, Python 3.11+ (tested on 3.14). Node.js 18+ is only needed to rebuild the UI.
 
@@ -34,6 +45,7 @@ This starts the server on <http://127.0.0.1:8765> and opens the browser. Options
 |---|---|
 | `--port N` | preferred port (falls back to the next free one if taken or reserved) |
 | `--no-browser` | don't open the UI |
+| `--tray` | run in the background with a tray icon (always on in the exe) |
 
 Running `python run.py` again while it's already running just opens the UI; it won't start a second backend.
 
@@ -48,6 +60,15 @@ npm run build
 ```
 
 The build lands in `backend/static/`. For live-reload development, run `npm run dev` (http://localhost:5173) while `python run.py` is running. Vite proxies `/api` and `/ws` to port 8765 (override with `FLEXIORDER_PORT`).
+
+### 📦 Building the portable exe
+
+```bash
+pip install -r backend/requirements-build.txt
+python packaging/build.py          # add --ui to rebuild the React UI first (needs Node.js)
+```
+
+This produces `dist/FlexiOrder-<version>-win64.exe` (PyInstaller, single file). Pushing a `v*` tag runs `.github/workflows/release.yml`, which tests, builds, and attaches the exe to the GitHub Release.
 
 ---
 
@@ -86,6 +107,8 @@ Live Win32 tests briefly open small test windows. Enable them with an environmen
 | `Port 8765 is unavailable, using …` | Normal: the port is taken or reserved by Windows (Hyper-V/WSL reserve ranges; see `netsh interface ipv4 show excludedportrange protocol=tcp`). The UI opens on the port printed. |
 | A monitor shows "Nessuna finestra disponibile" | Every window in that sequence is closed, minimized to another desktop, or on a different virtual desktop. Closed windows re-link automatically when reopened with the same program and title. |
 | Smart Pause doesn't trigger | Keep the FlexiOrder tab active in its browser window: the backend recognizes it by the `FlexiOrder #…` page title. |
+| The exe starts but nothing happens | Look at `flexiorder.log` next to the exe (or in `%APPDATA%\FlexiOrder\`): startup errors land there because the exe has no console. |
+| SmartScreen or an antivirus blocks the exe | The build is unsigned and PyInstaller exes are sometimes flagged as a false positive. Use **More info → Run anyway**, allow it in your antivirus, or build it yourself / run from source. |
 | A window ignores the carousel | It's probably running as administrator. Run FlexiOrder elevated too, or leave that window out. |
 | Picker doesn't list a window from another desktop | Untick "Solo finestre su …", but remember that window can only rotate on its own desktop. |
 
@@ -95,13 +118,15 @@ Live Win32 tests briefly open small test windows. Enable them with an environmen
 
 ```text
 flexiorder/
-├── run.py                     # one-command launcher
+├── run.py                     # one-command launcher (also the exe's entry point)
+├── packaging/build.py         # builds the portable exe
 ├── backend/
 │   ├── main.py                # legacy entry point (python main.py)
 │   ├── flexiorder/
 │   │   ├── app.py             # FastAPI routes, WebSocket state push, watcher, persistence glue
 │   │   ├── carousel.py        # Carousel (one thread per desktop×monitor) + CarouselManager
 │   │   ├── winapi.py          # Win32Backend: enumerate, raise/focus, borderless, F11, monitors
+│   │   ├── tray.py            # system-tray icon (portable exe / --tray)
 │   │   ├── vdesktop.py        # virtual desktops (IVirtualDesktopManager + registry, read-only)
 │   │   └── config.py          # %APPDATA% config + window re-matching
 │   ├── static/                # built UI

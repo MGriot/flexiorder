@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,7 +25,11 @@ from . import __version__, config
 from .carousel import CarouselManager
 from .winapi import Win32Backend
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+# A PyInstaller build unpacks the UI next to the bundled code (sys._MEIPASS).
+if getattr(sys, "frozen", False):
+    STATIC_DIR = Path(sys._MEIPASS) / "static"
+else:
+    STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
 WATCH_INTERVAL = 1.0      # desktop switch / monitor hot-plug detection
 REMATCH_INTERVAL = 3.0    # retry binding "missing" windows (e.g. app reopened)

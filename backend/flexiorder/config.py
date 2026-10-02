@@ -1,5 +1,6 @@
 """
-Persist sequences to %APPDATA%\\FlexiOrder\\config.json.
+Persist sequences to %APPDATA%\\FlexiOrder\\config.json, or next to the exe in
+the portable build (when that folder is writable).
 
 Window handles do not survive an app/PC restart, so each item also stores the
 process exe and title. On load an item is matched by hwnd first (still valid
@@ -10,13 +11,28 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 from .carousel import normalize_item
 
 
+def _writable(folder: Path) -> bool:
+    try:
+        fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
+        os.close(fd)
+        os.remove(tmp)
+        return True
+    except OSError:
+        return False
+
+
 def default_path() -> Path:
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if _writable(exe_dir):
+            return exe_dir / "config.json"
     base = os.environ.get("APPDATA") or str(Path.home())
     return Path(base) / "FlexiOrder" / "config.json"
 
