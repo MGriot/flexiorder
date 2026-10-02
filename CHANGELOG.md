@@ -6,6 +6,10 @@
 - **Portable single-file exe** (`FlexiOrder-<version>-win64.exe`) that needs no installation and no Python. It's built with PyInstaller via `packaging/build.py`, and a GitHub Actions release workflow builds it on every `v*` tag.
 - System-tray mode (`run.py --tray`, always on in the exe): Apri FlexiOrder / Esci, no console window.
 - The portable exe keeps `config.json` and `flexiorder.log` next to itself, falling back to `%APPDATA%\FlexiOrder` when that folder isn't writable.
+- `backend/tools/demo.py`: the real UI on fake monitors, desktops and windows, for trying it safely and for screenshots.
+
+### Docs
+- README: icon, badges, screenshots (dark/light theme, window picker), Mermaid diagrams (carousel layout, exe lifecycle, architecture), and a table of the Schermo modes.
 
 ## 2.0.0 — 2026-09-21
 

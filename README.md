@@ -1,8 +1,23 @@
-# ⧉ FlexiOrder — Window Carousel for Windows
+<p align="center">
+  <img src="docs/images/icon.png" width="96" alt="FlexiOrder icon">
+</p>
 
-FlexiOrder rotates windows automatically: each window stays in front for its own timer, then the next one takes over. It runs **one independent carousel per monitor, per virtual desktop**. Every screen on every desktop has its own windows, order, timers, and start/stop/pause.
+<h1 align="center">FlexiOrder</h1>
 
-It's a local app: a Python/FastAPI backend drives the Win32 API, and a React UI is served from the same process. Run it as a **portable single-file exe** (no install) or from source.
+<p align="center"><b>Window carousel for Windows</b>: one independent rotation per monitor, per virtual desktop.</p>
+
+<p align="center">
+  <a href="https://github.com/MGriot/flexiorder/releases/latest"><img src="https://img.shields.io/github/v/release/MGriot/flexiorder?label=download&logo=windows" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6" alt="Platform: Windows 10/11">
+  <img src="https://img.shields.io/badge/install-none%20(portable%20exe)-success" alt="No install">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/MGriot/flexiorder" alt="MIT license"></a>
+</p>
+
+FlexiOrder rotates windows automatically: each window stays in front for its own timer, then the next one takes over. It's built for wall displays, control rooms, dashboards and kiosks, or any setup where several screens should cycle through windows on their own.
+
+Every screen on every virtual desktop has its own windows, order, timers, and start/stop/pause. Download the **portable single-file exe** (no install) or run it from source.
+
+![FlexiOrder UI: two monitors, each with its own carousel](docs/images/ui-dark.png)
 
 ## ✨ Features
 
@@ -14,6 +29,27 @@ It's a local app: a Python/FastAPI backend drives the Win32 API, and a React UI 
 - **Smart Pause**: the monitor showing the FlexiOrder page pauses while you use it. Other monitors keep going.
 - **Persistent**: sequences are saved to `%APPDATA%\FlexiOrder\config.json` (the portable exe keeps them next to itself). After a restart, windows are re-linked by program + title. Closed windows show as "mancante" and re-link automatically when they reappear.
 - **Zero-latency switching**: DWM transitions are disabled during each switch.
+- **Portable**: a single exe with a tray icon, no installer and no Python needed.
+- **Light and dark theme**, local only (`127.0.0.1`), no account and no telemetry.
+
+### How the carousels are organised
+
+```mermaid
+flowchart LR
+    subgraph D1["🖥️ Virtual desktop: Control room (visible)"]
+        direction TB
+        M1["Monitor 1<br/>Grafana 20 s → Kibana 15 s → Status 10 s"]
+        M2["Monitor 2<br/>Power BI 30 s → Jira 20 s"]
+    end
+    subgraph D2["💤 Virtual desktop: Sviluppo (hidden, waiting)"]
+        direction TB
+        M3["Monitor 1<br/>VS Code"]
+        M4["Monitor 2<br/>Terminal"]
+    end
+    D1 -. "Win+Ctrl+→" .-> D2
+```
+
+Each box is its own carousel with its own thread. Only the carousels on the visible desktop rotate; the others resume when you switch back to their desktop.
 
 ---
 
@@ -27,6 +63,21 @@ Download `FlexiOrder-<version>-win64.exe` from the [GitHub Releases page](https:
 - `config.json` and `flexiorder.log` are written **next to the exe**, so you can carry it on a USB stick. If that folder isn't writable (e.g. Program Files), the config goes to `%APPDATA%\FlexiOrder\` instead.
 - The build is unsigned, so on first launch SmartScreen may say "Windows protected your PC". Click **More info → Run anyway**.
 - Launching it again while it's running just opens the UI.
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant Exe as FlexiOrder.exe
+    participant Tray as Tray icon ⧉
+    participant UI as Browser UI
+    You->>Exe: double-click
+    Exe->>Exe: start local server on 127.0.0.1:8765
+    Exe->>Tray: show icon
+    Exe->>UI: open http://127.0.0.1:8765
+    You->>UI: build sequences, press ▶ Avvia
+    You->>Tray: Esci
+    Tray->>Exe: stop carousels, restore windows, save config.json
+```
 
 ### From source
 
@@ -75,9 +126,24 @@ This produces `dist/FlexiOrder-<version>-win64.exe` (PyInstaller, single file). 
 ## 🛠️ Using it
 
 1. Pick a **virtual desktop** in the sidebar ("attuale" marks the one you're on).
-2. Each **monitor** is a column. Click **+ Aggiungi** to add windows. By default the picker lists windows on the selected desktop and shows each window's current monitor.
-3. Drag cards to reorder. Set the **Timer** (seconds) and the **Schermo** mode (Normale / Borderless / F11).
-4. Press **▶ Avvia** on each monitor you want rotating. Use **⏸ Pausa** / **■ Ferma** per monitor, or **Ferma tutto**.
+2. Each **monitor** is a column. Click **+ Aggiungi** to add windows. By default the picker lists windows on the selected desktop and shows each window's current monitor. Windows already used by another carousel are tagged *in uso*.
+
+   ![Window picker](docs/images/picker.png)
+
+3. Drag cards (⠿) to reorder. Set the **Timer** (seconds) and the **Schermo** mode:
+
+   | Schermo | What happens | Needs focus |
+   |---|---|---|
+   | **Normale** | the window is raised as it is | no |
+   | **Borderless** | frame removed, fills the monitor, restored on stop | no |
+   | **F11** | presses the app's own fullscreen key (browsers) | yes |
+
+4. Press **▶ Avvia** on each monitor you want rotating. Use **⏸ Pausa** / **■ Ferma** per monitor, or **Ferma tutto**. The active window is highlighted, and the status bar shows its position (e.g. *Attivo – 2 / 3*).
+5. Switch to the light theme with **Tema chiaro** in the sidebar.
+
+<p align="center">
+  <img src="docs/images/ui-light.png" width="80%" alt="FlexiOrder light theme">
+</p>
 
 ### Limitations (by design of Windows)
 
@@ -94,7 +160,10 @@ pip install -r backend/requirements-dev.txt
 cd backend
 python -m pytest tests            # fast, OS-independent logic tests
 python tools/diag.py              # what FlexiOrder sees: monitors, desktops, windows
+python tools/demo.py              # the real UI on fake windows: http://127.0.0.1:8790
 ```
+
+`tools/demo.py` runs the real API and UI on an in-memory backend with two fake monitors, two virtual desktops and sample dashboards. It never touches your windows, so it's handy for trying the UI and for the README screenshots.
 
 Live Win32 tests briefly open small test windows. Enable them with an environment variable (cmd: `set FLEXIORDER_LIVE=1`, PowerShell: `$env:FLEXIORDER_LIVE="1"`), then run `python -m pytest tests` again. The multi-monitor live test runs automatically when 2+ monitors are connected.
 
@@ -131,8 +200,23 @@ flexiorder/
 │   │   └── config.py          # %APPDATA% config + window re-matching
 │   ├── static/                # built UI
 │   ├── tests/                 # pytest (fake backend + opt-in live tests)
-│   └── tools/diag.py
-└── frontend/src/App.jsx       # React UI (one column per monitor, dnd-kit)
+│   └── tools/                 # diag.py (what the backend sees), demo.py (fake-window demo)
+├── frontend/src/App.jsx       # React UI (one column per monitor, dnd-kit)
+├── docs/images/               # README screenshots and icon
+└── .github/workflows/         # release.yml: test + build + attach exe on v* tags
+```
+
+```mermaid
+flowchart LR
+    UI["React UI<br/>(browser tab)"] -- "REST /api/*" --> API["FastAPI app<br/>app.py"]
+    API -- "WebSocket /ws<br/>full state on every change" --> UI
+    API --> MGR["CarouselManager<br/>carousel.py"]
+    MGR --> C1["Carousel<br/>desktop × monitor<br/>(thread)"]
+    MGR --> C2["Carousel …"]
+    C1 & C2 --> BE["Win32Backend<br/>winapi.py"]
+    BE --> VD["vdesktop.py<br/>IVirtualDesktopManager + registry"]
+    API <--> CFG[("config.json")]
+    TRAY["Tray icon<br/>tray.py"] -. "Esci → shutdown" .-> API
 ```
 
 The carousel logic talks to the OS only through the small `WindowBackend` protocol in `carousel.py`. The tests swap in a fake, so scheduling, pausing and desktop gating are tested without real windows.
