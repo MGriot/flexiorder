@@ -77,6 +77,15 @@ class DemoBackend:
         self.windows[hwnd]["monitor"] = monitor_id
         return True
 
+    def list_tabs(self, hwnd):
+        return ["Dashboard", "Inbox", "Calendar"]
+
+    def select_tab(self, hwnd, tab):
+        return True
+
+    def refresh(self, hwnd, hidden):
+        return True
+
     def restore_window(self, hwnd):
         pass
 
@@ -90,7 +99,8 @@ class DemoBackend:
         return DESKTOPS
 
     def list_windows(self):
-        return [{"hwnd": h, "title": w["title"], "exe": w["exe"], "monitor": w["monitor"],
+        return [{"hwnd": h, "title": w["title"], "exe": w["exe"], "browser": w["exe"] in ("chrome.exe", "msedge.exe"),
+                 "monitor": w["monitor"],
                  "desktop": w["desktop"], "minimized": False} for h, w in self.windows.items()]
 
 

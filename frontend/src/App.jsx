@@ -31,6 +31,13 @@ const MODES = [
   { value: "f11", label: "F11" },
 ];
 
+const REFRESH = [
+  { value: "off", label: "Mai" },
+  { value: "before", label: "Prima (in background)" },
+  { value: "show", label: "Alla comparsa" },
+  { value: "mid", label: "A metà timer" },
+];
+
 const STATUS = {
   stopped: { label: "● Inattivo", cls: "idle" },
   running: { label: "▶ Attivo", cls: "running" },
@@ -41,6 +48,8 @@ const STATUS = {
 };
 
 const keyOf = (desktop, monitor) => `${desktop}|${monitor}`;
+// A browser window can hold several items (one per tab), so identity is hwnd + tab.
+const itemKey = (hwnd, tab) => `${hwnd}|${tab || ""}`;
 
 async function api(path, method = "GET", body) {
   const res = await fetch(`${API}${path}`, {
@@ -83,6 +92,7 @@ function WindowCard({ item, index, isActive, onChange, onRemove }) {
         <span className="win-title" title={`${item.title}${item.exe ? ` (${item.exe})` : ""}`}>
           {item.title}
         </span>
+        {item.tab && <span className="badge" title="Scheda del browser">scheda</span>}
         {item.missing && <span className="badge badge--warn" title="Finestra chiusa o non trovata: verrà ricollegata quando riappare">mancante</span>}
         <button className="remove-btn" onClick={() => onRemove(item.id)} title="Rimuovi">✕</button>
       </div>
@@ -112,6 +122,17 @@ function WindowCard({ item, index, isActive, onChange, onRemove }) {
             {MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </label>
+        <label className="field-inline">
+          <span>Aggiorna</span>
+          <select
+            className="mode-select"
+            value={item.refresh || "off"}
+            onChange={(e) => onChange(item.id, "refresh", e.target.value)}
+            title="Ricarica la pagina (F5/Ctrl+R). Prima: in background poco prima del suo turno (non sempre supportato). Alla comparsa / A metà timer: invia Ctrl+R, quindi il monitor prende il focus."
+          >
+            {REFRESH.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+        </label>
       </div>
     </div>
   );
@@ -124,6 +145,19 @@ function PickerModal({ desktop, monitor, desktops, monitors, usedBy, exclude, on
   const [windows, setWindows] = useState(null);
   const [filter, setFilter] = useState("");
   const [onlyHere, setOnlyHere] = useState(true);
+  const [tabs, setTabs] = useState({}); // hwnd -> null (loading) | string[]
+  const [open, setOpen] = useState(null);
+
+  const toggleTabs = (hwnd) => {
+    if (open === hwnd) return setOpen(null);
+    setOpen(hwnd);
+    if (tabs[hwnd] === undefined) {
+      setTabs((t) => ({ ...t, [hwnd]: null }));
+      api(`/api/windows/${hwnd}/tabs`)
+        .then((d) => setTabs((t) => ({ ...t, [hwnd]: d.tabs })))
+        .catch(() => setTabs((t) => ({ ...t, [hwnd]: [] })));
+    }
+  };
 
   useEffect(() => {
     api("/api/windows").then((d) => setWindows(d.windows)).catch(() => setWindows([]));
@@ -135,7 +169,7 @@ function PickerModal({ desktop, monitor, desktops, monitors, usedBy, exclude, on
 
   const list = (windows ?? []).filter(
     (w) =>
-      !exclude.has(w.hwnd) &&
+      (w.browser || !exclude.has(itemKey(w.hwnd))) &&
       (!onlyHere || !multiDesk || w.desktop === desktop.id || !w.desktop) &&
       `${w.title} ${w.exe}`.toLowerCase().includes(filter.toLowerCase())
   );
@@ -157,17 +191,41 @@ function PickerModal({ desktop, monitor, desktops, monitors, usedBy, exclude, on
         <ul className="picker-list">
           {windows === null && <li className="picker-empty">Caricamento…</li>}
           {list.map((w) => (
-            <li key={w.hwnd} className="picker-item" onClick={() => onAdd(w)}>
-              <div className="picker-main">
-                <span className="picker-title">{w.title}</span>
-                <span className="picker-meta">
-                  {w.exe || "?"} · {monName(w.monitor)}
-                  {multiDesk && ` · ${deskName(w.desktop)}`}
-                  {w.minimized && " · ridotta a icona"}
-                  {usedBy.get(w.hwnd) && <span className="badge">in uso: {usedBy.get(w.hwnd)}</span>}
-                </span>
+            <li key={w.hwnd} className="picker-group">
+              <div className="picker-item" onClick={() => (w.browser ? toggleTabs(w.hwnd) : onAdd(w))}>
+                <div className="picker-main">
+                  <span className="picker-title">{w.title}</span>
+                  <span className="picker-meta">
+                    {w.exe || "?"} · {monName(w.monitor)}
+                    {multiDesk && ` · ${deskName(w.desktop)}`}
+                    {w.minimized && " · ridotta a icona"}
+                    {usedBy.get(itemKey(w.hwnd)) && <span className="badge">in uso: {usedBy.get(itemKey(w.hwnd))}</span>}
+                  </span>
+                </div>
+                <span className="picker-add">{w.browser ? (open === w.hwnd ? "▾" : "▸ schede") : "+"}</span>
               </div>
-              <span className="picker-add">+</span>
+              {w.browser && open === w.hwnd && (
+                <ul className="picker-tabs">
+                  {tabs[w.hwnd] == null && <li className="picker-empty">Caricamento schede…</li>}
+                  {tabs[w.hwnd]?.length === 0 && <li className="picker-empty">Nessuna scheda trovata</li>}
+                  {(tabs[w.hwnd] ?? []).map((t) => (
+                    <li key={t} className={`picker-item picker-tab ${exclude.has(itemKey(w.hwnd, t)) ? "picker-item--used" : ""}`}
+                      onClick={() => !exclude.has(itemKey(w.hwnd, t)) && onAdd({ ...w, title: t, tab: t })}>
+                      <div className="picker-main">
+                        <span className="picker-title">{t}</span>
+                        {usedBy.get(itemKey(w.hwnd, t)) && <span className="picker-meta"><span className="badge">in uso: {usedBy.get(itemKey(w.hwnd, t))}</span></span>}
+                      </div>
+                      <span className="picker-add">+</span>
+                    </li>
+                  ))}
+                  {!w.title.includes("FlexiOrder") && (
+                    <li className="picker-item picker-tab" onClick={() => onAdd({ ...w, tab: "" })}>
+                      <div className="picker-main"><span className="picker-title">Solo la finestra (scheda attiva)</span></div>
+                      <span className="picker-add">+</span>
+                    </li>
+                  )}
+                </ul>
+              )}
             </li>
           ))}
           {windows !== null && list.length === 0 && <li className="picker-empty">Nessuna finestra trovata</li>}
@@ -203,6 +261,7 @@ function MonitorColumn({ desktop, monitor, carousel, onItems, onAction, onPick, 
   const change = (id, field, value) => onItems(items.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
   const remove = (id) => onItems(items.filter((s) => s.id !== id));
   const hasF11 = items.some((i) => i.mode === "f11");
+  const hasKeyRefresh = items.some((i) => i.refresh === "show" || i.refresh === "mid");
 
   return (
     <section className={`column ${disconnected ? "column--off" : ""}`}>
@@ -238,6 +297,10 @@ function MonitorColumn({ desktop, monitor, carousel, onItems, onAction, onPick, 
 
       {hasF11 && (
         <p className="hint hint--warn">F11 richiede il focus: quando mostra quella finestra, questo monitor prende la tastiera.</p>
+      )}
+
+      {hasKeyRefresh && (
+        <p className="hint hint--warn">Aggiorna «Alla comparsa» / «A metà timer» invia Ctrl+R: quella finestra prende il focus.</p>
       )}
 
       {items.length === 0 ? (
@@ -335,7 +398,7 @@ export default function App() {
     (state?.carousels ?? []).forEach((c) => {
       const mon = state.monitors.find((x) => x.id === c.monitor)?.name ?? c.monitor;
       const desk = state.desktops.find((x) => x.id === c.desktop)?.name ?? "";
-      c.items.forEach((i) => m.set(i.hwnd, state.desktops.length > 1 ? `${mon} · ${desk}` : mon));
+      c.items.forEach((i) => m.set(itemKey(i.hwnd, i.tab), state.desktops.length > 1 ? `${mon} · ${desk}` : mon));
     });
     return m;
   }, [state]);
@@ -362,8 +425,8 @@ export default function App() {
 
   const addWindow = (monitorId, w) => {
     const cur = carousels.get(keyOf(desktop.id, monitorId))?.items ?? [];
-    if (cur.some((i) => i.hwnd === w.hwnd)) return;
-    setItems(monitorId, [...cur, { id: Math.random().toString(36).slice(2, 14), hwnd: w.hwnd, title: w.title, exe: w.exe, timer: 5, mode: "none" }]);
+    if (cur.some((i) => itemKey(i.hwnd, i.tab) === itemKey(w.hwnd, w.tab))) return;
+    setItems(monitorId, [...cur, { id: Math.random().toString(36).slice(2, 14), hwnd: w.hwnd, title: w.title, exe: w.exe, timer: 5, mode: "none", tab: w.tab || "", refresh: "off" }]);
   };
 
   const runningCount = (state?.carousels ?? []).filter((c) => c.running).length;
@@ -444,7 +507,7 @@ export default function App() {
         <PickerModal
           desktop={desktop} monitor={picker} desktops={desktops} monitors={state.monitors}
           usedBy={usedBy}
-          exclude={new Set((carousels.get(keyOf(desktop.id, picker.id))?.items ?? []).map((i) => i.hwnd))}
+          exclude={new Set((carousels.get(keyOf(desktop.id, picker.id))?.items ?? []).map((i) => itemKey(i.hwnd, i.tab)))}
           onAdd={(w) => { addWindow(picker.id, w); setPicker(null); }}
           onClose={() => setPicker(null)}
         />

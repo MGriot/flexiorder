@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.0 — 2026-11-08
+
+### Added
+- **Browser tabs.** In the window picker, Chrome/Edge/Firefox/Brave/Opera/Vivaldi windows expand into their tabs (via Windows UI Automation). Each tab is its own item, so several tabs of one window can sit in the same sequence; the carousel selects the tab, then raises the window.
+- **Page refresh** per window ("Aggiorna"): *Prima* (F5 posted to the browser in the background just before its turn, best effort), *Alla comparsa* (Ctrl+R when it appears) or *A metà timer* (Ctrl+R once halfway through). The key-sending modes take focus on that monitor, like F11.
+
+### Fixed
+- A browser window disappeared from the picker while its active tab was FlexiOrder itself. It is now always listed and its other tabs can be added.
+- Windows that fail to enumerate are logged instead of being silently dropped.
+
 ## 2.1.0 — 2026-10-02
 
 ### Added

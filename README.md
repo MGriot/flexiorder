@@ -148,6 +148,8 @@ This produces `dist/FlexiOrder-<version>-win64.exe` (PyInstaller, single file). 
 ### Limitations (by design of Windows)
 
 - **Switching desktops is up to you.** Windows' only public API for moving windows between virtual desktops works on the caller's own windows. So add windows that already live on that desktop. FlexiOrder never shows a window from another desktop, because activating it would make Windows jump desktops.
+- **Browser tabs.** In *+ Aggiungi*, click a browser row to list its tabs and add the ones you want; several tabs of one window can be in the same sequence. Tab names are matched after a restart by title (Chrome's "Memory usage" suffix is ignored).
+- **Aggiorna (page refresh).** Per window: *Mai*, *Prima* (F5 sent to the browser in the background ~3 s before its turn; best effort, no focus needed), *Alla comparsa* or *A metà timer* (Ctrl+R; needs focus like F11).
 - **F11 needs keyboard focus.** A monitor showing an F11 window takes the keyboard at that moment. Use *Borderless* if several monitors rotate at once.
 - Elevated (admin) windows can't be controlled from a non-elevated FlexiOrder.
 
@@ -194,6 +196,7 @@ flexiorder/
 │   ├── flexiorder/
 │   │   ├── app.py             # FastAPI routes, WebSocket state push, watcher, persistence glue
 │   │   ├── carousel.py        # Carousel (one thread per desktop×monitor) + CarouselManager
+│   │   ├── tabs.py            # browser tab list/select via UI Automation
 │   │   ├── winapi.py          # Win32Backend: enumerate, raise/focus, borderless, F11, monitors
 │   │   ├── tray.py            # system-tray icon (portable exe / --tray)
 │   │   ├── vdesktop.py        # virtual desktops (IVirtualDesktopManager + registry, read-only)

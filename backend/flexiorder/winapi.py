@@ -19,7 +19,7 @@ import win32con
 import win32gui
 import win32process
 
-from . import vdesktop
+from . import tabs, vdesktop
 
 user32 = ctypes.windll.user32
 dwmapi = ctypes.windll.dwmapi
@@ -43,6 +43,8 @@ BLOCKED_CLASSES = {
     "tooltips_class32", "Windows.UI.Core.CoreWindow",
 }
 UI_TITLE_MARK = "FlexiOrder #"
+# Child windows that receive keyboard input for the page in a browser.
+CONTENT_CLASSES = {"Chrome_RenderWidgetHostHWND", "MozillaWindowClass"}
 
 FULLSCREEN_MODES = ("none", "borderless", "f11")
 
@@ -87,24 +89,33 @@ def _exe_name(hwnd: int) -> str:
     return ""
 
 
-def _is_candidate(hwnd: int) -> bool:
-    """Top-level, user-facing application window (on any virtual desktop)."""
+def _reject_reason(hwnd: int) -> str | None:
+    """Why `hwnd` is not a user-facing application window (None = it is one)."""
     if not win32gui.IsWindowVisible(hwnd):
-        return False
+        return "not visible"
     title = win32gui.GetWindowText(hwnd).strip()
-    if len(title) < 2 or UI_TITLE_MARK in title or title == "Program Manager":
-        return False
+    if len(title) < 2 or title == "Program Manager":
+        return "no title"
     if win32gui.GetClassName(hwnd) in BLOCKED_CLASSES:
-        return False
+        return "blocked class"
     if win32gui.GetWindow(hwnd, win32con.GW_OWNER):
-        return False
+        return "owned window"
     if win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_TOOLWINDOW:
-        return False
+        return "tool window"
     # Cloaked windows on the *current* desktop are really hidden (suspended
     # UWP apps etc.). Windows on other desktops are cloaked too — keep those.
     if _cloaked(hwnd) and vdesktop.is_on_current(hwnd):
-        return False
-    return True
+        return "cloaked"
+    return None
+
+
+def _is_ui_window(hwnd: int) -> bool:
+    return UI_TITLE_MARK in win32gui.GetWindowText(hwnd)
+
+
+def _is_candidate(hwnd: int) -> bool:
+    """Top-level, user-facing application window (on any virtual desktop)."""
+    return _reject_reason(hwnd) is None
 
 
 def _rect_covers(outer, inner) -> bool:
@@ -160,17 +171,31 @@ class Win32Backend:
         out = []
         for hwnd in self.candidate_hwnds():
             try:
+                exe = _exe_name(hwnd)
+                browser = tabs.is_browser(exe)
+                title = win32gui.GetWindowText(hwnd)
+                if _is_ui_window(hwnd):
+                    if not browser:
+                        continue
+                    title = exe  # active tab is FlexiOrder itself: do not echo its token
                 out.append({
                     "hwnd": hwnd,
-                    "title": win32gui.GetWindowText(hwnd),
-                    "exe": _exe_name(hwnd),
+                    "title": title,
+                    "exe": exe,
+                    "browser": browser,
                     "monitor": self.monitor_of(hwnd),
                     "desktop": vdesktop.window_desktop_id(hwnd),
                     "minimized": bool(win32gui.IsIconic(hwnd)),
                 })
-            except Exception:
-                continue  # window vanished mid-enumeration
+            except Exception as e:
+                print(f"[winapi] skipping window {hwnd}: {e}")  # vanished mid-enumeration
         return out
+
+    def list_tabs(self, hwnd: int) -> list[str]:
+        return tabs.list_tabs(hwnd, UI_TITLE_MARK) if self.is_window(hwnd) else []
+
+    def select_tab(self, hwnd: int, tab: str) -> bool:
+        return self.is_window(hwnd) and tabs.select_tab(hwnd, tab)
 
     def window_info(self, hwnd: int) -> dict | None:
         if not self.is_window(hwnd):
@@ -268,6 +293,26 @@ class Win32Backend:
         for hwnd in list(self._saved_styles):
             self.restore_window(hwnd)
 
+    def refresh(self, hwnd: int, hidden: bool) -> bool:
+        """
+        Reload the page in `hwnd` (F5).
+        hidden=True posts the key straight to the browser's content window, so
+        nothing is raised or focused (best effort). hidden=False focuses the
+        window and sends Ctrl+R, but only while it really is the foreground.
+        """
+        if not self.is_window(hwnd):
+            return False
+        try:
+            if hidden:
+                return self._post_f5(hwnd)
+            if not self._focus(hwnd):
+                return False
+            self._tap(win32con.VK_CONTROL, ord("R"))
+            return True
+        except Exception as e:
+            print(f"[winapi] refresh({hwnd}) failed: {e}")
+            return False
+
     # ── internals ───────────────────────────────────────────
     def _move_to_monitor(self, hwnd: int, mon: dict) -> None:
         was_max = user32.IsZoomed(hwnd)
@@ -329,6 +374,34 @@ class Win32Backend:
                 if attached:
                     user32.AttachThreadInput(me, other, False)
             return win32gui.GetForegroundWindow() == hwnd
+
+    @staticmethod
+    def _tap(*vks: int) -> None:
+        """Press the keys together (modifier first), then release in reverse."""
+        for vk in vks:
+            win32api.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.01)
+        for vk in reversed(vks):
+            win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    @staticmethod
+    def _post_f5(hwnd: int) -> bool:
+        targets: list[int] = []
+
+        def _cb(h, _):
+            if win32gui.GetClassName(h) in CONTENT_CLASSES:
+                targets.append(h)
+        try:
+            win32gui.EnumChildWindows(hwnd, _cb, None)
+        except Exception:
+            pass
+        if not targets:
+            return False
+        scan = win32api.MapVirtualKey(win32con.VK_F5, 0)
+        for h in targets[:1]:
+            win32gui.PostMessage(h, win32con.WM_KEYDOWN, win32con.VK_F5, 1 | (scan << 16))
+            win32gui.PostMessage(h, win32con.WM_KEYUP, win32con.VK_F5, 1 | (scan << 16) | (1 << 30) | (1 << 31))
+        return True
 
     def _ensure_f11(self, hwnd: int, mon: dict) -> None:
         """Press F11 only if the window is not already fullscreen (F11 toggles)."""

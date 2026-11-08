@@ -21,6 +21,7 @@ class FakeBackend:
         self.restored: list[int] = []
         self.fullscreen: set[int] = set()
         self.f11_presses: list[int] = []
+        self.events: list[tuple] = []  # ordered ("tab"|"refresh"|"show", hwnd, ...)
         self.lock = threading.Lock()
 
     def add(self, hwnd, monitor="M1", desktop="d1", title=None):
@@ -49,6 +50,7 @@ class FakeBackend:
         if hwnd not in self.windows:
             return False
         with self.lock:
+            self.events.append(("show", hwnd))
             self.windows[hwnd]["monitor"] = monitor_id
             self.shown.append((hwnd, monitor_id, mode, focus))
             if focus or mode == "f11":
@@ -56,6 +58,16 @@ class FakeBackend:
             if mode == "f11" and hwnd not in self.fullscreen:  # mirrors Win32Backend._ensure_f11
                 self.f11_presses.append(hwnd)
                 self.fullscreen.add(hwnd)
+        return True
+
+    def select_tab(self, hwnd, tab):
+        with self.lock:
+            self.events.append(("tab", hwnd, tab))
+        return True
+
+    def refresh(self, hwnd, hidden):
+        with self.lock:
+            self.events.append(("refresh", hwnd, hidden))
         return True
 
     def restore_window(self, hwnd):
@@ -88,5 +100,6 @@ def wait_until(pred, timeout=3.0):
     return False
 
 
-def items(*hwnds, timer=0.1, mode="none"):
-    return [{"id": f"i{h}", "hwnd": h, "title": f"win{h}", "timer": timer, "mode": mode} for h in hwnds]
+def items(*hwnds, timer=0.1, mode="none", **extra):
+    return [{"id": f"i{h}", "hwnd": h, "title": f"win{h}", "timer": timer, "mode": mode, **extra}
+            for h in hwnds]

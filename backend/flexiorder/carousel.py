@@ -17,6 +17,8 @@ from typing import Callable, Protocol
 from .vdesktop import DEFAULT_DESKTOP
 
 POLL = 0.2  # seconds between pause/stop checks while a window is shown
+BEFORE_LEAD = 3.0  # "before" refresh happens this long before the window's turn
+REFRESH_MODES = ("off", "before", "show", "mid")
 
 
 class WindowBackend(Protocol):
@@ -28,6 +30,8 @@ class WindowBackend(Protocol):
     def current_desktop(self) -> str | None: ...
     def show(self, hwnd: int, monitor_id: str, mode: str, focus: bool) -> bool: ...
     def restore_window(self, hwnd: int) -> None: ...
+    def select_tab(self, hwnd: int, tab: str) -> bool: ...
+    def refresh(self, hwnd: int, hidden: bool) -> bool: ...
 
 
 def make_key(desktop: str, monitor: str) -> str:
@@ -47,6 +51,8 @@ def normalize_item(raw: dict) -> dict:
         "exe": str(raw.get("exe") or ""),
         "timer": max(timer, 0.01),
         "mode": mode if mode in ("none", "borderless", "f11") else "none",
+        "tab": str(raw.get("tab") or ""),
+        "refresh": raw.get("refresh") if raw.get("refresh") in REFRESH_MODES else "off",
         "missing": bool(raw.get("missing", False)),
     }
 
@@ -196,8 +202,30 @@ class Carousel:
             self.manager.notify()
         return None
 
+    def _upcoming(self, item: dict) -> dict | None:
+        """The item that follows `item` in the sequence (None if it is the same window)."""
+        with self._lock:
+            ids = [i["id"] for i in self.items]
+            if item["id"] not in ids or len(ids) < 2:
+                return None
+            nxt = self.items[(ids.index(item["id"]) + 1) % len(ids)]
+        return nxt if nxt["hwnd"] != item["hwnd"] else None
+
+    def _prepare(self, item: dict) -> None:
+        """Refresh `item`'s page while it is hidden (its turn comes next)."""
+        be = self.manager.backend
+        if not be.is_window(item["hwnd"]) or not self._reachable(item):
+            return
+        if item["tab"]:
+            be.select_tab(item["hwnd"], item["tab"])
+        be.refresh(item["hwnd"], True)
+
+    def _reachable(self, item: dict) -> bool:
+        return self.desktop == DEFAULT_DESKTOP or self.manager.backend.is_on_current_desktop(item["hwnd"])
+
     def _run(self, stop: threading.Event) -> None:
         be = self.manager.backend
+        prepared: set[str] = set()  # items already refreshed ahead of their turn
         try:
             while not stop.is_set():
                 self._wake.clear()
@@ -221,13 +249,24 @@ class Carousel:
                 focus = be.monitor_of(be.foreground()) == self.monitor
                 if stop.is_set():
                     break
+                if item["tab"]:
+                    be.select_tab(item["hwnd"], item["tab"])  # before raising: no wrong-tab flash
+                fresh = self.active_id != item["id"]  # not a re-show after a pause
+                if fresh and item["refresh"] == "before" and item["id"] not in prepared:
+                    be.refresh(item["hwnd"], True)  # nothing ran before it: refresh just ahead
+                prepared.discard(item["id"])
                 be.show(item["hwnd"], self.monitor, item["mode"], focus)
+                if fresh and item["refresh"] == "show":
+                    be.refresh(item["hwnd"], False)
                 with self._lock:
                     self.active_id = item["id"]
                     self.status = "running"
                 self.manager.notify()
 
                 deadline = time.monotonic() + item["timer"]
+                mid_at = time.monotonic() + item["timer"] / 2 if item["refresh"] == "mid" else None
+                nxt = self._upcoming(item)
+                pre = nxt is not None and nxt["refresh"] == "before"
                 interrupted = False
                 while not stop.is_set():
                     remaining = deadline - time.monotonic()
@@ -236,6 +275,13 @@ class Carousel:
                     if self._hold_reason():
                         interrupted = True
                         break
+                    if mid_at is not None and time.monotonic() >= mid_at:
+                        mid_at = None
+                        be.refresh(item["hwnd"], False)
+                    if pre and remaining <= BEFORE_LEAD:
+                        pre = False
+                        self._prepare(nxt)
+                        prepared.add(nxt["id"])
                     if self._wake.wait(min(POLL, remaining)):
                         self._wake.clear()
                         with self._lock:  # shown item removed → move on now

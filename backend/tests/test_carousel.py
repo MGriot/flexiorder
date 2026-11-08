@@ -203,3 +203,75 @@ def test_timer_and_mode_are_sanitised(manager):
     snap = c.snapshot()["items"]
     assert snap[0]["timer"] == 5 and snap[0]["mode"] == "none" and snap[0]["id"]
     assert snap[1]["mode"] == "f11"
+
+
+# ── tabs & refresh ──────────────────────────────────────────
+def _events(backend, kind):
+    with backend.lock:
+        return [e for e in backend.events if e[0] == kind]
+
+
+def test_tab_selected_before_window_is_raised(manager, backend):
+    backend.add(1)
+    c = manager.get("d1", "M1")
+    c.set_items(items(1, timer=0.05, tab="Inbox"))
+    c.start()
+    assert wait_until(lambda: len(backend.shown) >= 2)
+    ev = backend.events
+    assert ev[0] == ("tab", 1, "Inbox") and ev[1] == ("show", 1)
+
+
+def test_two_tabs_of_one_window_alternate(manager, backend):
+    backend.add(1)
+    c = manager.get("d1", "M1")
+    c.set_items([
+        {"id": "a", "hwnd": 1, "title": "A", "timer": 0.05, "tab": "A"},
+        {"id": "b", "hwnd": 1, "title": "B", "timer": 0.05, "tab": "B"},
+    ])
+    c.start()
+    assert wait_until(lambda: len(_events(backend, "tab")) >= 4)
+    assert [e[2] for e in _events(backend, "tab")][:4] == ["A", "B", "A", "B"]
+
+
+def test_refresh_show_happens_after_raise(manager, backend):
+    backend.add(1)
+    c = manager.get("d1", "M1")
+    c.set_items(items(1, timer=0.05, refresh="show"))
+    c.start()
+    assert wait_until(lambda: len(_events(backend, "refresh")) >= 1)
+    assert backend.events[:2] == [("show", 1), ("refresh", 1, False)]
+
+
+def test_refresh_mid_fires_once_per_turn_while_visible(manager, backend):
+    backend.add(1)
+    c = manager.get("d1", "M1")
+    c.set_items(items(1, timer=0.4, refresh="mid"))
+    c.start()
+    assert wait_until(lambda: len(backend.shown) >= 2, timeout=3)
+    refreshes = _events(backend, "refresh")
+    assert refreshes and all(r == ("refresh", 1, False) for r in refreshes)
+    assert len(refreshes) <= len(backend.shown)
+
+
+def test_refresh_before_runs_hidden_ahead_of_its_turn(manager, backend):
+    backend.add(1)
+    backend.add(2)
+    c = manager.get("d1", "M1")
+    its = items(1, 2, timer=0.3)
+    its[1]["refresh"] = "before"
+    c.set_items(its)
+    c.start()
+    assert wait_until(lambda: len(_events(backend, "refresh")) >= 2, timeout=3)
+    ev = backend.events
+    first_show_2 = ev.index(("show", 2))
+    assert ("refresh", 2, True) in ev[:first_show_2 + 1]  # hidden refresh preceded its show
+    assert all(e[2] is True for e in _events(backend, "refresh"))
+
+
+def test_refresh_off_never_refreshes(manager, backend):
+    backend.add(1)
+    c = manager.get("d1", "M1")
+    c.set_items(items(1, timer=0.05))
+    c.start()
+    assert wait_until(lambda: len(backend.shown) >= 3)
+    assert _events(backend, "refresh") == []

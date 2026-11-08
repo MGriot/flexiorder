@@ -45,6 +45,8 @@ class Item(BaseModel):
     exe: str = ""
     timer: float = Field(5, ge=1, le=3600)
     mode: Literal["none", "borderless", "f11"] = "none"
+    tab: str = ""
+    refresh: Literal["off", "before", "show", "mid"] = "off"
     missing: bool = False
 
 
@@ -203,6 +205,11 @@ def get_state():
 @app.get("/api/windows")
 def list_windows():
     return {"windows": rt.backend.list_windows()}
+
+
+@app.get("/api/windows/{hwnd}/tabs")
+def window_tabs(hwnd: int):
+    return {"tabs": rt.backend.list_tabs(hwnd)}
 
 
 @app.put("/api/carousel/sequence")

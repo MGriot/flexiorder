@@ -772,3 +772,17 @@ body,
     grid-template-columns: 1fr;
   }
 }
+
+/* Browser windows expand into their tabs */
+.picker-group { list-style: none; }
+.picker-tabs {
+  list-style: none;
+  margin: 2px 0 6px 18px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.picker-tab { padding: 7px 12px; }
+.picker-item--used { opacity: .45; cursor: default; }

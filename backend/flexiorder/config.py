@@ -18,6 +18,9 @@ from pathlib import Path
 from .carousel import normalize_item
 
 
+ITEM_FIELDS = ("id", "hwnd", "title", "exe", "timer", "mode", "tab", "refresh")
+
+
 def _writable(folder: Path) -> bool:
     try:
         fd, tmp = tempfile.mkstemp(dir=folder, suffix=".tmp")
@@ -50,7 +53,7 @@ def save(path: Path, carousels: list[dict]) -> None:
         "version": 2,
         "carousels": [
             {"desktop": c["desktop"], "monitor": c["monitor"],
-             "items": [{k: i[k] for k in ("id", "hwnd", "title", "exe", "timer", "mode")} for i in c["items"]]}
+             "items": [{k: n[k] for k in ITEM_FIELDS} for n in map(normalize_item, c["items"])]}
             for c in carousels if c["items"]
         ],
     }
@@ -69,26 +72,36 @@ def rematch(items: list[dict], windows: list[dict]) -> list[dict]:
     def _same_app(it: dict, w: dict) -> bool:
         return not it["exe"] or not w["exe"] or w["exe"] == it["exe"]
 
-    # Pass 1: handles that are still valid keep their window.
-    taken: set[int] = set()
+    # Pass 1: handles that are still valid keep their window. Several items may
+    # share one browser window (one per tab), so only the hwnd is reused.
     pending = []
     for it in out:
         w = live.get(it["hwnd"])
-        if w and w["hwnd"] not in taken and _same_app(it, w):
-            taken.add(w["hwnd"])
-            it.update(title=w["title"], exe=w["exe"] or it["exe"], missing=False)
+        if w and _same_app(it, w):
+            it.update(exe=w["exe"] or it["exe"], missing=False)
+            if not it["tab"]:
+                it["title"] = w["title"]
         else:
             pending.append(it)
 
     # Pass 2: exact title, then a shared 20-char title prefix, same exe.
+    # Whole-window items claim a window once; tab items may share it.
+    taken = {it["hwnd"] for it in out if it not in pending and not it["tab"]}
     for it in pending:
-        pool = [w for w in windows if w["hwnd"] not in taken and _same_app(it, w)]
+        pool = [w for w in windows if (it["tab"] or w["hwnd"] not in taken) and _same_app(it, w)]
+        if it["tab"]:
+            pool = [w for w in pool if w.get("browser")]
         p = it["title"][:20]
         match = (next((w for w in pool if w["title"] == it["title"]), None)
                  or next((w for w in pool if p and w["title"][:20] == p), None))
+        if it["tab"] and not match:
+            match = next(iter(pool), None)  # tab titles differ from window titles: any same-app browser window
         if match:
-            taken.add(match["hwnd"])
-            it.update(hwnd=match["hwnd"], title=match["title"], exe=match["exe"] or it["exe"], missing=False)
+            if not it["tab"]:
+                taken.add(match["hwnd"])
+            it.update(hwnd=match["hwnd"], exe=match["exe"] or it["exe"], missing=False)
+            if not it["tab"]:
+                it["title"] = match["title"]
         else:
             it["missing"] = True
     return out

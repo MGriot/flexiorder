@@ -41,3 +41,20 @@ def test_save_load_roundtrip(tmp_path):
     assert len(data["carousels"]) == 1
     assert data["carousels"][0]["items"][0]["mode"] == "f11"
     assert config.load(tmp_path / "nope.json") == {}
+
+
+def test_tab_and_refresh_roundtrip_and_shared_window(tmp_path):
+    from flexiorder import config
+    items = [
+        {"id": "a", "hwnd": 10, "title": "Inbox", "exe": "chrome.exe", "timer": 5, "tab": "Inbox", "refresh": "mid"},
+        {"id": "b", "hwnd": 10, "title": "Cal", "exe": "chrome.exe", "timer": 5, "tab": "Cal", "refresh": "off"},
+    ]
+    p = tmp_path / "c.json"
+    config.save(p, [{"desktop": "d", "monitor": "M", "items": items}])
+    saved = config.load(p)["carousels"][0]["items"]
+    assert [(i["tab"], i["refresh"]) for i in saved] == [("Inbox", "mid"), ("Cal", "off")]
+
+    # window handle changed after restart: both tabs re-bind to the one live browser window
+    live = [{"hwnd": 99, "title": "Whatever - Google Chrome", "exe": "chrome.exe", "browser": True}]
+    out = config.rematch(saved, live)
+    assert [(i["hwnd"], i["missing"]) for i in out] == [(99, False), (99, False)]
